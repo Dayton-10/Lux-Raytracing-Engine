@@ -6,289 +6,214 @@
 #include "stb_image_write.h"
 #include "stdio.h"
 #include "math.h"
+#include "ray.h"
 
 #define X_RES 512
 #define Y_RES 512
+#define MAX_REFLECTIONS 10
 
-typedef struct Point {
-	float x, y, z;
-} Point;
+// Declare global variables
+unsigned char *image;         // Image array, stored in row-major order
+Ray *rays;                    // Ray array
+Sphere *spheres;              // Sphere array
+Triangle *triangles;          // Triangle array
+int numSpheres, numTriangles; // Sphere/triangle array sizes
 
-typedef struct Vector {
-	float x, y, z;
-} Vector;
+Point camera;       // Camera location
+Point light;        // Light source location
+Point imagePlaneBL; // Image plane bottom-left corner
+Point imagePlaneTR; // Image plane top-right corner
 
-typedef struct Ray {
-  Point point;
-  Vector vector;
-} Ray;
-
-typedef struct Sphere {
-  Point center;
-  float radius;
-} Sphere;
-
-// Create a white test image with pixel 0 being black
-void createWhiteImage(unsigned char *image) {
-  for(int x=0; x<X_RES; x++) {
-    for(int y=0; y<Y_RES; y++) {
-      image[(3*x)+(X_RES*y*3)+0] = 255; // Set red channel to max
-      image[(3*x)+(X_RES*y*3)+1] = 255; // Set green channel to max
-      image[(3*x)+(X_RES*y*3)+2] = 255; // Set blue channel to max
-    }
-  }
-
-  // Set pixel 0 to black
-  image[0] = 0;
-  image[1] = 0;
-  image[2] = 0;
-}
-
-// Create a gradient test image
-void createGradientImage(unsigned char *image) {
-  for(int x=0; x<X_RES; x++) {
-    for(int y=0; y<Y_RES; y++) {
-      image[3*(x+X_RES*y)+0] = (float)x/X_RES*255;       // Red gradient (left to right)
-      image[3*(x+X_RES*y)+1] = 255 - (float)y/Y_RES*255; // Green gradient (top to bottom)
-      image[3*(x+X_RES*y)+2] = 128;                      // Set blue channel to 128
-    }
-  }
-}
-
-// Create a checkerboard test image
-void createCheckerboardImage(unsigned char *image) {
-  
-  for(int y=0; y<Y_RES; y+=128)        // Split image into 128x128 chunks
-    for(int x=0; x<X_RES; x+=128)
-      for(int yIn=y; yIn<y+128 && yIn<Y_RES; yIn++) // In each 128x128 chunk, iterate through all pixels
-        for(int xIn=x; xIn<x+128 && xIn<X_RES; xIn++) {
-          
-          int currentPixel = xIn + (X_RES * yIn);
-          
-          if (xIn-x<64 && yIn-y<64) {        // Set lower-left square blue
-            image[3*currentPixel+0] = 0;
-            image[3*currentPixel+1] = 0;
-            image[3*currentPixel+2] = 255;
-          } else if (xIn-x>63 && yIn-y>63) { // Set upper-right square blue
-            image[3*currentPixel+0] = 0;
-            image[3*currentPixel+1] = 0;
-            image[3*currentPixel+2] = 255;
-          } else {                           // Set rest red
-            image[3*currentPixel+0] = 255;
-            image[3*currentPixel+1] = 0;
-            image[3*currentPixel+2] = 0;
-          }
-        }
-}
-
-// Returns norm of input vector
-float norm(Vector v) {
-  return sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
-}
-
-// Prints vector as "<x, y, z>"
-void printVector(Vector v) {
-  printf("<%f, %f, %f>", v.x, v.y, v.z);
-}
-
-// Prints point as "(x, y, z)"
-void printPoint(Point p) {
-  printf("(%f, %f, %f)", p.x, p.y, p.z);
-}
-
-// Prints ray information in custom assignment format
-void printRay(Ray r) {
-  printf("RayPosition %f %f %f\n", r.point.x, r.point.y, r.point.z);
-  printf("RayDirection %f %f %f\n", r.vector.x, r.vector.y, r.vector.z);
-}
-
-// Returns normalized input vector from vector v
-Vector normalize(Vector v) {
-  float n = norm(v);
-  Vector result;
-  result.x = v.x / n;
-  result.y = v.y / n;
-  result.z = v.z / n;
-  return result;
-}
-
-// Returns scalar dot Product of vectors v and w
-float dotProduct(Vector v, Vector w) {
-  return v.x*w.x + v.y*w.y + v.z*w.z;
-}
-
-// Returns a vector of the corss product of vectors v and w
-Vector crossProduct(Vector v, Vector w) {
-  Vector result;
-  result.x = v.y*w.z - v.z*w.y;
-  result.y = v.z*w.x - v.x*w.z;
-  result.z = v.x*w.y - v.y*w.x;
-  return result;
-}
-
-// Returns a vector describing the difference of points p and q
-Vector pointDifference(Point p, Point q) {
-  Vector result;
-  result.x = p.x - q.x;
-  result.y = p.y - q.y;
-  result.z = p.z - q.z;
-  return result;
-}
-
-// Returns a vector multiplied by scalar f
-Vector scaleVector(Vector v, float f) {
-  Vector result;
-  result.x = v.x * f;
-  result.y = v.y * f;
-  result.z = v.z * f;
-  return result;
-}
-
-float sphereIntersect(Ray ray, Sphere sphere) {
-  // Calculate quadratic solutions for t
-  float a = dotProduct(ray.vector, ray.vector);
-  float b = dotProduct(scaleVector(ray.vector, 2), pointDifference(ray.point, sphere.center));
-  float c = dotProduct(pointDifference(ray.point, sphere.center), pointDifference(ray.point, sphere.center)) - (sphere.radius * sphere.radius);
-  float t1 = (-b + sqrtf(b*b - 4*a*c))/(2*a);
-  float t2 = (-b - sqrtf(b*b - 4*a*c))/(2*a);
-  
-  // Return smallest t value
-  if (t1>0 && t1<t2) {
-    return t1;
-  } else {
-    return t2;
-  }
-}
 
 int main(void) {
 	
-  // In this program, the origin is assumed to be at the lower
-  //   left-hand corner of an image
+  // In this program, the origin is assumed to be at the lower left-hand corner of an image
   stbi_flip_vertically_on_write(1);
   
-  // Allocate memory for image array
-  // The image is stored as described above, in row-major order
-	unsigned char *image;
+  // Initiating materials
+  Material refl  = { .r=0,   .g=0,   .b=0,   .reflective=1 };
+  Material blue  = { .r=0,   .g=0,   .b=255, .reflective=0 };
+  Material red   = { .r=255, .g=0,   .b=0,   .reflective=0 };
+  Material white = { .r=255, .g=255, .b=255, .reflective=0 };
+  
+  // Allocate memory for respective arrays
 	image = malloc(X_RES*Y_RES*3*sizeof(unsigned char));
+  rays  = malloc(X_RES*Y_RES*sizeof(Ray));
 	
-	// Check for null pointer
+	// Check for null pointers
 	if (image == NULL) {
 		printf("Error allocating memory for image array. Exiting...\n");
 		exit(0);
-	}
-  
-  // Generate white test image with lower-left pixel black
-  //createWhiteImage(image);
-  //stbi_write_png("white.png", X_RES, Y_RES, 3, image, X_RES*3);
-  
-  // Generate gradient test image
-  createGradientImage(image);
-  stbi_write_png("gradient.png", X_RES, Y_RES, 3, image, X_RES*3);
-  
-  // Generate checkerboard test image
-  createCheckerboardImage(image);
-  stbi_write_png("checkerboard.png", X_RES, Y_RES, 3, image, X_RES*3);
-  
-  // Allocate memory for ray array
-  Ray *rays;
-  rays = malloc(X_RES*Y_RES*sizeof(Ray));
-  
-  // Check for null pointer
-  if (rays == NULL) {
+	} else if (rays == NULL) {
     printf("Error allocating memory for ray array. Exiting...\n");
     exit(0);
   }
   
-  // Create camera location
-  Point camera;
+  // Initialize respective locations:
+  // Camera
   camera.x = 0;
   camera.y = 0;
   camera.z = 0;
-	
-	// Create image plane corners
-  // TL = top left, BR = bottom right
-  Point imagePlaneBL;
+  // Light source
+  light.x = 3;
+  light.y = 5;
+  light.z = -15;
+	// Image plane corners
   imagePlaneBL.x = -1;
   imagePlaneBL.y = -1;
   imagePlaneBL.z = -2;
-  
-  Point imagePlaneTR;
   imagePlaneTR.x = 1;
   imagePlaneTR.y = 1;
   imagePlaneTR.z = -2;
   
-  // Set ray positions; all (0,0,0)  
-  for(int x=0; x<X_RES; x++) {
-    for(int y=0; y<Y_RES; y++) {
-      rays[x+y*X_RES].point.x = camera.x;
-      rays[x+y*X_RES].point.y = camera.y;
-      rays[x+y*X_RES].point.z = camera.z;
-    }
+  // Instantiate spheres array and fill w/ spheres
+  numSpheres = 3;
+  spheres   = malloc(numSpheres*sizeof(Sphere));
+  if (spheres == NULL) {
+		printf("Error allocating memory for spheres array. Exiting...\n");
+		exit(0);
+	}
+  spheres[0] = (Sphere) { .center.x=0,  .center.y=0,  .center.z=-16, .radius=2, .material=refl };
+  spheres[1] = (Sphere) { .center.x=3,  .center.y=-1, .center.z=-14, .radius=1, .material=refl };
+  spheres[2] = (Sphere) { .center.x=-3, .center.y=-1, .center.z=-14, .radius=1, .material=red };
+  
+  // Instantiate triangles array and fill w/ triangles
+  numTriangles = 5;
+  triangles = malloc(numTriangles*sizeof(Triangle));
+  if (triangles == NULL) {
+		printf("Error allocating memory for triangles array. Exiting...\n");
+		exit(0);
+	}
+  triangles[0] = (Triangle) { .a.x=-8, .a.y=-2, .a.z=-20, .b.x=8,  .b.y=-2, .b.z=-20, .c.x=8,  .c.y=10, .c.z=-20, .material=blue };
+  triangles[1] = (Triangle) { .a.x=-8, .a.y=-2, .a.z=-20, .b.x=8,  .b.y=10, .b.z=-20, .c.x=-8, .c.y=10, .c.z=-20, .material=blue };
+  triangles[2] = (Triangle) { .a.x=-8, .a.y=-2, .a.z=-20, .b.x=8,  .b.y=-2, .b.z=-10, .c.x=8,  .c.y=-2, .c.z=-20, .material=white };
+  triangles[3] = (Triangle) { .a.x=-8, .a.y=-2, .a.z=-20, .b.x=-8, .b.y=-2, .b.z=-10, .c.x=8,  .c.y=-2, .c.z=-10, .material=white };
+  triangles[4] = (Triangle) { .a.x=8,  .a.y=-2, .a.z=-20, .b.x=8,  .b.y=-2, .b.z=-10, .c.x=8,  .c.y=10, .c.z=-20, .material=red };
+  
+  
+  // Set ray positions to camera position
+  for(int i=0; i<X_RES*Y_RES; i++) {
+    rays[i].point.x = camera.x;
+    rays[i].point.y = camera.y;
+    rays[i].point.z = camera.z;
+    rays[i].numReflections = 0; // Ray hasn't reflected yet
   }
   
   // Calculate ray directions
-  float pixelWidth = (imagePlaneTR.x - imagePlaneBL.x) / X_RES;
-  float pixelHeight = (imagePlaneTR.y - imagePlaneBL.y) / Y_RES;
+  float deltaX = (imagePlaneTR.x - imagePlaneBL.x) / X_RES;
+  float deltaY = (imagePlaneTR.y - imagePlaneBL.y) / Y_RES;
   int currentRay;
 	for(int y=0; y<Y_RES; y++) {
     for(int x=0; x<X_RES; x++) {
       currentRay = x+y*X_RES; // Calculate current ray index
       
       // Calculate current ray vector
-      rays[currentRay].vector.x = imagePlaneBL.x + x*pixelWidth + 0.5*pixelWidth;
-      rays[currentRay].vector.y = imagePlaneBL.y + y*pixelHeight + 0.5*pixelHeight;
-      rays[currentRay].vector.z = -2;
+      rays[currentRay].vector.x = imagePlaneBL.x + x*deltaX + 0.5*deltaX;
+      rays[currentRay].vector.y = imagePlaneBL.y + y*deltaY + 0.5*deltaY;
+      rays[currentRay].vector.z = (imagePlaneBL.z + imagePlaneTR.z) / 2;
       
       rays[currentRay].vector = normalize(rays[currentRay].vector); // Nomalize resultant vectors
     }
   }
   
-  // Print bottom-left pixel ray info
-  printf("Bottom left pixel\n");
-  printRay(rays[0+0*X_RES]);
-  printf("\n");
   
-  // Print top-right pixel ray info
-  printf("Top right pixel\n");
-  printRay(rays[(X_RES-1)+(Y_RES-1)*X_RES]);
-  printf("\n");
   
-  // Print middle pixel ray info
-  printf("Middle pixel\n");
-  printRay(rays[(X_RES/2)+(Y_RES/2)*X_RES]);
-  printf("\n");
+  // Calculate ray intersections
+  RayHit hit, temp, shadowHit;
+  Ray shadowRay;               // Ray used for testing for shadows
+  Vector toLight;              // Vector pointing towards light source
+  float diffuse;               // Coefficient used for diffuse shading
   
-  // Instantiate sphere
-  Sphere sphere;
-  sphere.center.x = 2;
-  sphere.center.y = 2;
-  sphere.center.z = -16;
-  sphere.radius = 5.3547;
-  
-  // Calculate ray-sphere intersections
-  float intersection;
-  for(int y=0; y<Y_RES; y++)
+  for(int y=0; y<Y_RES; y++) {
     for(int x=0; x<X_RES; x++) {
-      currentRay = x+y*X_RES;
-      intersection = sphereIntersect(rays[currentRay], sphere);
       
-      if (intersection > 0) {         // Intersection, draw white
-        image[currentRay*3 +0] = 255;
-        image[currentRay*3 +1] = 255;
-        image[currentRay*3 +2] = 255;
-      } else {                        // No intersection, draw red
-        image[currentRay*3 +0] = 128;
+      currentRay = x+y*X_RES; // Calculate current ray index
+      
+      do {
+        
+        hit.t = INFINITY; // Initialize to no hits
+      
+        // Find shortest hit in spheres
+        for(int i=0; i<numSpheres; i++) {
+          temp = sphereIntersect(rays[currentRay], spheres[i]);
+          if (temp.t < hit.t && temp.t > 0) {
+            hit = temp;
+          }
+        }
+      
+        // Find shortest hit in triangles
+        for(int i=0; i<numTriangles; i++) {
+          temp = triangleIntersect(rays[currentRay], triangles[i]);
+          if (temp.t < hit.t && temp.t > 0) {
+            hit = temp;
+          }
+        }
+      
+        if (hit.t < INFINITY && hit.material.reflective == 1) {
+          rays[currentRay] = reflect(rays[currentRay], hit);
+        } else {
+          break;
+        }
+      
+      } while (hit.material.reflective == 1 && rays[currentRay].numReflections < MAX_REFLECTIONS); // Continue while hitting reflective materials
+      
+      // Intersection, draw object appropriately
+      if (hit.t > 0 && hit.t < INFINITY) {
+        
+        // Calculate shading
+        toLight = normalize(pointDifference(light, hit.p));
+        
+        // Shadows
+        shadowRay.vector = toLight;
+        shadowRay.point  = hit.p;
+        shadowRay.point  = pointPlusVector(shadowRay.point, scaleVector(shadowRay.vector, 0.001)); // Fix shadow acne
+        
+       
+        // Determine any objects between hit and light source
+        shadowHit.t = INFINITY;
+        for(int i=0; i<numSpheres; i++) {
+          temp = sphereIntersect(shadowRay, spheres[i]);
+          if (temp.t < shadowHit.t && temp.t > 0) {
+            shadowHit = temp;
+          }
+        }
+        for(int i=0; i<numTriangles; i++) {
+          temp = triangleIntersect(shadowRay, triangles[i]);
+          if (temp.t < shadowHit.t && temp.t > 0) {
+            shadowHit = temp;
+          }
+        }
+        
+        // Check if in shadow
+        if (shadowHit.t < distance(shadowRay.point, light)) {
+          diffuse = 0.2;
+        } else { // Diffuse shading
+          diffuse = dotProduct(hit.v, toLight);
+          if (diffuse < 0.2) {
+            diffuse = 0.2;
+          }
+        }
+        
+        // Draw pixel with appropriate color and shading
+        image[currentRay*3+0] = hit.material.r * diffuse;
+        image[currentRay*3+1] = hit.material.g * diffuse;
+        image[currentRay*3+2] = hit.material.b * diffuse;
+        
+      } else {
+        // No intersection, draw black
+        image[currentRay*3 +0] = 0;
         image[currentRay*3 +1] = 0;
         image[currentRay*3 +2] = 0;
       }
-      
     }
+  }
   
   // Write ray-traced image
-  stbi_write_png("sphere.png", X_RES, Y_RES, 3, image, X_RES*3);
+  stbi_write_png("reference.png", X_RES, Y_RES, 3, image, X_RES*3);
   
-	
 	// Free malloc-ed arrays
 	free(image);
   free(rays);
+  free(spheres);
+  free(triangles);
 }
