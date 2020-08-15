@@ -1,0 +1,3 @@
+nvcc -o ray ray.cu -ccbin "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC\14.23.28105\bin"
+
+ray.exe xRes yRes
