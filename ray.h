@@ -5,211 +5,272 @@
 #include "stdio.h"
 #include "math.h"
 
-typedef struct Point {
-	float x, y, z;
-} Point;
+// Constant memory declarations
+__constant__ float Camera[3];
+__constant__ float Light[3];
+__constant__ float ImagePlaneBL[3];
+__constant__ float ImagePlaneTR[3];
+__constant__ int XRes;
+__constant__ int YRes;
 
-typedef struct Vector {
-	float x, y, z;
-} Vector;
+// Device memory declarations (geometry attributes)
+float *d_radii;
+float *d_a; // Point coordinates stored in row-major order (x, y, z, x, y, z, etc.)
+float *d_b;
+float *d_c;
+int *d_reflective;
+unsigned char *d_color;
 
-typedef struct Ray {
-  Point point;
-  Vector vector;
-  int numReflections;
-} Ray;
+enum reflectivity { NO_REFL, REFL };
 
-typedef struct Material {
-  unsigned char r; // Red value
-  unsigned char g; // Blue value
-  unsigned char b; // Green value
-  int reflective;  // Boolean for reflectivity
-} Material;
+typedef struct {
+  int n;                  // Number of objects
+  float *radii;           // Radii of objects (-1 if triangles)
+  float *a;               // Point A (center if sphere)
+  float *b;               // Point B
+  float *c;               // Point C
+  int *reflective;        // Material reflectivity (boolean)
+  unsigned char *color;   // Material color
+} GeometryList;
 
-typedef struct Sphere {
-  Point center;       // Center of sphere
-  float radius;       // Radius of sphere
-  Material material;  // Color & reflectivity of sphere
-} Sphere;
-
-typedef struct Triangle {
-  Point a;
-  Point b;
-  Point c;
-  Material material;
-} Triangle;
-
-typedef struct RayHit {
-  float t;           // Distance to hit
-  Material material; // Material of object hit
-  Point p;           // Point at hit
-  Vector v;          // Vector normal to hit location
-} RayHit;
-
-// Returns norm of input vector
-float norm(Vector v) {
-  return sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
+// Initializes GeometryList struct and returns pointer
+GeometryList* initGeometryList( ) {
+  GeometryList *list = (GeometryList *) malloc(sizeof(GeometryList));
+  list -> n = 0;
+  list -> radii = (float *) malloc(sizeof(float) * 0);
+  list -> a = (float *) malloc(sizeof(float) * 0);
+  list -> b = (float *) malloc(sizeof(float) * 0);
+  list -> c = (float *) malloc(sizeof(float) * 0);
+  list -> reflective = (int *) malloc(sizeof(int) * 0);
+  list -> color = (unsigned char *) malloc(sizeof(unsigned char) * 0);
+  return list;
 }
 
-// Returns distance between two points
-float distance(Point p, Point q) {
-  return sqrtf(p.x*q.x + p.y*q.y + p.z*q.z);
+// Adds a sphere with given traits to the GeometryList specified
+__host__ void addSphere(GeometryList *list, float radius, float center[3], int refl, unsigned char col[3]) {
+  list -> n += 1;
+  
+  list -> radii = (float *) realloc(list->radii, (list->n) * sizeof(float));
+  list -> radii[list->n-1] = radius;
+  
+  list -> a = (float *) realloc(list->a, (list->n) * sizeof(float) * 3);
+  list -> a[3 * (list->n-1) + 0] = center[0];
+  list -> a[3 * (list->n-1) + 1] = center[1];
+  list -> a[3 * (list->n-1) + 2] = center[2];
+  
+  list -> b = (float *) realloc(list->b, (list->n) * sizeof(float) * 3);
+  
+  list -> c = (float *) realloc(list->c, (list->n) * sizeof(float) * 3);
+  
+  list -> reflective = (int *) realloc(list->reflective, (list->n) * sizeof(int));
+  list -> reflective[list->n-1] = refl;
+  
+  list -> color = (unsigned char *) realloc(list->color, (list->n) * sizeof(unsigned char) * 3);
+  list -> color[3 * (list->n-1) + 0] = col[0];
+  list -> color[3 * (list->n-1) + 1] = col[1];
+  list -> color[3 * (list->n-1) + 2] = col[2];
 }
 
-// Returns normalized input vector from vector v
-Vector normalize(Vector v) {
-  float n = norm(v);
-  Vector result;
-  result.x = v.x / n;
-  result.y = v.y / n;
-  result.z = v.z / n;
-  return result;
+// Adds a triangle with given traits to the GeometryList specified
+__host__ void addTriangle(GeometryList *list, float a[3], float b[3], float c[3], int refl, unsigned char col[3]) {
+  list -> n += 1;
+  
+  list -> radii = (float *) realloc(list->radii, (list->n) * sizeof(float));
+  list -> radii[list->n-1] = -1; // Radius of -1 indicates a triangle
+  
+  list -> a = (float *) realloc(list->a, (list->n) * sizeof(float) * 3);
+  list -> a[3 * (list->n-1) + 0] = a[0];
+  list -> a[3 * (list->n-1) + 1] = a[1];
+  list -> a[3 * (list->n-1) + 2] = a[2];
+  
+  list -> b = (float *) realloc(list->b, (list->n) * sizeof(float) * 3);
+  list -> b[3 * (list->n-1) + 0] = b[0];
+  list -> b[3 * (list->n-1) + 1] = b[1];
+  list -> b[3 * (list->n-1) + 2] = b[2];
+  
+  list -> c = (float *) realloc(list->c, (list->n) * sizeof(float) * 3);
+  list -> c[3 * (list->n-1) + 0] = c[0];
+  list -> c[3 * (list->n-1) + 1] = c[1];
+  list -> c[3 * (list->n-1) + 2] = c[2];
+  
+  list -> reflective = (int *) realloc(list->reflective, (list->n) * sizeof(int));
+  list -> reflective[list->n-1] = refl;
+  
+  list -> color = (unsigned char *) realloc(list->color, (list->n) * sizeof(unsigned char) * 3);
+  list -> color[3 * (list->n-1) + 0] = col[0];
+  list -> color[3 * (list->n-1) + 1] = col[1];
+  list -> color[3 * (list->n-1) + 2] = col[2];
 }
 
-// Returns scalar dot Product of vectors v and w
-float dotProduct(Vector v, Vector w) {
-  return v.x*w.x + v.y*w.y + v.z*w.z;
+// Prints the information of the geometry at the given index
+__host__ void printGeometry(GeometryList *list, int index) {
+  if (index >= list -> n) {
+    printf("No geometry at index %d\n", index);
+    return;
+  }
+  
+  printf("Geometry at index %d:\n", index);
+  printf("\tRadius: %f\n", list->radii[index]);
+  printf("\tPoint 1: %f, %f, %f\n", list->a[3*index+0], list->a[3*index+1], list->a[3*index+2]);
+  printf("\tPoint 2: %f, %f, %f\n", list->b[3*index+0], list->b[3*index+1], list->b[3*index+2]);
+  printf("\tPoint 3: %f, %f, %f\n", list->c[3*index+0], list->c[3*index+1], list->c[3*index+2]);
+  printf("\tReflectivity: %d\n", list->reflective[index]);
+  printf("\tColor: %d, %d, %d\n", list->color[3*index+0], list->color[3*index+1], list->color[3*index+2]);
+  printf("\n");
 }
 
-// Returns a vector of the corss product of vectors v and w
-Vector crossProduct(Vector v, Vector w) {
-  Vector result;
-  result.x = v.y*w.z - v.z*w.y;
-  result.y = v.z*w.x - v.x*w.z;
-  result.z = v.x*w.y - v.y*w.x;
-  return result;
+__device__ float d_norm(float *v) {
+  return sqrtf(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
 }
 
-// Returns a vector from point q to point p
-Vector pointDifference(Point p, Point q) {
-  Vector result;
-  result.x = p.x - q.x;
-  result.y = p.y - q.y;
-  result.z = p.z - q.z;
-  return result;
+__device__ float d_distance(float *p, float *q) {
+  return sqrtf(p[0]*q[0] + p[1]*q[1] + p[2]*q[2]);
 }
 
-// Returns a vector normal to a sphere, relative to a point of intersection
-Vector sphereNormal(Sphere s, Point p) {
-  Vector v;
-  v = pointDifference(p, s.center);
-  return normalize(v);
+// Returns a normalized vector
+__device__ void d_normalize(float *result, float *v) {
+  float n = d_norm(v);
+  result[0] = v[0] / n;
+  result[1] = v[1] / n;
+  result[2] = v[2] / n;
 }
 
-// Returns a vector normal to a triangle's surface
-Vector triangleNormal(Triangle t) {
-  Vector a = pointDifference(t.a, t.b);
-  Vector b = pointDifference(t.a, t.c);
-  Vector v;
-  v = crossProduct(a, b);
-  return normalize(v);
+// Returns scalar result of dot product of input vectors
+__device__ float d_dotProduct(float *v, float *w) {
+  return v[0]*w[0] + v[1]*w[1] + v[2]*w[2];
 }
 
-// Returns a point equal to the point input plus the vector
-Point pointPlusVector(Point p, Vector v) {
-  Point result;
-  result.x = p.x + v.x;
-  result.y = p.y + v.y;
-  result.z = p.z + v.z;
-  return result;
+// Returns a vector of the cross product of input vectors
+__device__ void d_crossProduct(float *result, float *v, float *w) {
+  result[0] = v[1]*w[2] - v[2]*w[1];
+  result[1] = v[2]*w[0] - v[0]*w[2];
+  result[2] = v[0]*w[1] - v[1]*w[0];
+}
+
+// Returns a vector describing the difference between input points
+__device__ void d_pointDifference(float *result, float *p, float *q) {
+  result[0] = p[0] - q[0];
+  result[1] = p[1] - q[1];
+  result[2] = p[2] - q[2];
+}
+
+// Returns a vector orthogonal to a sphere, relative to a given point
+__device__ void d_sphereNormal(float *result, float *center, float *p) {
+  d_pointDifference(result, p, center);
+  d_normalize(result, result);
+}
+
+// Returns a vector orthogonal to a triangle's surface
+__device__ void d_triangleNormal(float *result, float *a, float *b, float *c) {
+  float v[3];
+  float w[3];
+  d_pointDifference(v, a, b);
+  d_pointDifference(w, a, c);
+  d_crossProduct(result, v, w);
+  d_normalize(result, result);
+}
+
+// Returns a point equal to the point given plus the given vector
+__device__ void d_pointPlusVector(float *result, float *p, float *v) {
+  result[0] = p[0] + v[0];
+  result[1] = p[1] + v[1];
+  result[2] = p[2] + v[2];
 }
 
 // Returns a vector multiplied by scalar f
-Vector scaleVector(Vector v, float f) {
-  Vector result;
-  result.x = v.x * f;
-  result.y = v.y * f;
-  result.z = v.z * f;
-  return result;
+__device__ void d_scaleVector(float *result, float *v, float f) {
+  result[0] = v[0] * f;
+  result[1] = v[1] * f;
+  result[2] = v[2] * f;
 }
 
 // Returns the sum of two vectors
-Vector vectorAdd(Vector v, Vector w) {
-  Vector result;
-  result.x = v.x + w.x;
-  result.y = v.y + w.y;
-  result.z = v.z + w.z;
-  return result;
+__device__ void d_vectorAdd(float *result, float *v, float *w) {
+  result[0] = v[0] + w[0];
+  result[1] = v[1] + w[1];
+  result[2] = v[2] + w[2];
 }
 
-// Returns a RayHit struct describing the intersection of a Ray and Sphere
-RayHit sphereIntersect(Ray ray, Sphere sphere) {
-  // Calculate quadratic solutions for t
-  float a = dotProduct(ray.vector, ray.vector);
-  float b = dotProduct(scaleVector(ray.vector, 2), pointDifference(ray.point, sphere.center));
-  float c = dotProduct(pointDifference(ray.point, sphere.center), pointDifference(ray.point, sphere.center)) - (sphere.radius * sphere.radius);
-  float t1 = (-b + sqrtf(b*b - 4*a*c))/(2*a);
-  float t2 = (-b - sqrtf(b*b - 4*a*c))/(2*a);
+// Returns a float describing the distance to an intersection with the given geometry
+//   The point of intersection can be calculated by adding the (rayDir * result) + rayPos
+//   The normal vector of intersection can be calculated by using a d_*normal() function with the hit point given (if a sphere)
+__device__ float d_intersect(float *rayPos, float *rayDir, int geomIndex, float *g_radii, float *g_a, float *g_b, float *g_c) {
   
-  RayHit hit;
+  if (g_radii[geomIndex] == -1) { // If triangle
   
-  // Return smallest t value
-  if (t1>0 && t1<t2) {
-    hit.t = t1;
-  } else {
-    hit.t = t2;
-  }
-  
-  hit.material = sphere.material;
-  hit.p = pointPlusVector(ray.point, scaleVector(ray.vector, hit.t));
-  hit.v = sphereNormal(sphere, hit.p);
-  
-  return hit;
-}
+    float a = g_a[3*geomIndex + 0] - g_b[3*geomIndex + 0];
+    float b = g_a[3*geomIndex + 1] - g_b[3*geomIndex + 1];
+    float c = g_a[3*geomIndex + 2] - g_b[3*geomIndex + 2];
+    
+    float d = g_a[3*geomIndex + 0] - g_c[3*geomIndex + 0];
+    float e = g_a[3*geomIndex + 1] - g_c[3*geomIndex + 1];
+    float f = g_a[3*geomIndex + 2] - g_c[3*geomIndex + 2];
+    
+    float g = rayDir[0];
+    float h = rayDir[1];
+    float i = rayDir[2];
+    
+    float j = g_a[3*geomIndex + 0] - rayPos[0];
+    float k = g_a[3*geomIndex + 1] - rayPos[1];
+    float l = g_a[3*geomIndex + 2] - rayPos[2];
+    
+    float m = a*(e*i - h*f) + b*(g*f - d*i) + c*(d*h - e*g);
+    
+    // Result variables
+    float beta = (j*(e*i - h*f) + k*(g*f - d*i) + l*(d*h - e*g))/m;
+    float gamma = (i*(a*k - j*b) + h*(j*c - a*l) + g*(b*l - k*c))/m;
+    float t = -(f*(a*k - j*b) + e*(j*c - a*l) + d*(b*l - k*c)) / m;
+    
+    // Check for hit within triangle
+    if (t < 0) {
+      return INFINITY;
+    } else if (gamma < 0 || gamma > 1) {
+      return INFINITY;
+    } else if (beta < 0 || beta > 1-gamma) {
+      return INFINITY;
+    } else {
+      return t;
+    }
+    
+    
+  } else {                        // Else, if sphere
+    
+    float a = d_dotProduct(rayDir, rayDir);
+    
+    float v[3];
+    float w[3];
+    d_scaleVector(v, rayDir, 2);
+    d_pointDifference(w, rayPos, &g_a[3*geomIndex]);
+    float b = d_dotProduct(v, w);
+    
+    float c = d_dotProduct(w, w) - (g_radii[geomIndex] * g_radii[geomIndex]);
+    
+    float t1 = (-b + sqrtf(b*b - 4*a*c))/(2*a);
+    float t2 = (-b - sqrtf(b*b - 4*a*c))/(2*a);
+    
+    if (t1 > 0 && t1 < t2) {
+      return t1;
+    } else if (t2 > 0 && t2 < t1) {
+      return t2;
+    } else {
+      return INFINITY;
+    }
 
-// Returns a RayHit struct describing the intersection of a Ray and Triangle
-RayHit triangleIntersect(Ray ray, Triangle triangle) {
-  RayHit hit;
-  
-  // Helper variables
-  float a = triangle.a.x - triangle.b.x;
-  float b = triangle.a.y - triangle.b.y;
-  float c = triangle.a.z - triangle.b.z;
-  float d = triangle.a.x - triangle.c.x;
-  float e = triangle.a.y - triangle.c.y;
-  float f = triangle.a.z - triangle.c.z;
-  float g = ray.vector.x;
-  float h = ray.vector.y;
-  float i = ray.vector.z;
-  float j = triangle.a.x - ray.point.x;
-  float k = triangle.a.y - ray.point.y;
-  float l = triangle.a.z - ray.point.z;
-  float m = a*(e*i - h*f) + b*(g*f - d*i) + c*(d*h - e*g);
-  
-  // Result variables
-  float beta = (j*(e*i - h*f) + k*(g*f - d*i) + l*(d*h - e*g))/m;
-  float gamma = (i*(a*k - j*b) + h*(j*c - a*l) + g*(b*l - k*c))/m;
-  float t = -(f*(a*k - j*b) + e*(j*c - a*l) + d*(b*l - k*c)) / m;
-  
-  // Check for hit within triangle
-  if (t<0) {
-    hit.t = INFINITY;
-    return hit;
-  } else if (gamma < 0 || gamma > 1) {
-    hit.t = INFINITY;
-    return hit;
-  } else if (beta < 0 || beta > 1-gamma) {
-    hit.t = INFINITY;
-    return hit;
   }
-  
-  hit.t = t;
-  hit.material = triangle.material;
-  hit.p = pointPlusVector(ray.point, scaleVector(ray.vector, hit.t));
-  hit.v = triangleNormal(triangle);
-  
-  return hit;
 }
 
 // Returns a new ray reflected from the hit of the input ray
-Ray reflect(Ray ray, RayHit hit) {
-  Ray result;
+//   Will set result Pos/Dir to reflected ray
+//   Requires distance to hit and normal vector of hit object
+// Always increment numReflections after calling this function!
+__device__ void d_reflect(float *resultPos, float *resultDir, float *rayPos, float *rayDir, float *hit, float *vector) {
+  float v[3];
+  float w[3];
+  d_scaleVector(v, vector, -2*d_dotProduct(rayDir, vector));
+  d_vectorAdd(w, rayDir, v);
+  d_normalize(resultDir, w);
   
-  result.point = hit.p;
-  result.vector = normalize(vectorAdd(ray.vector, scaleVector(hit.v, -2*dotProduct(ray.vector, hit.v))));
-  result.numReflections = ray.numReflections + 1;
-  
-  result.point = pointPlusVector(result.point, scaleVector(result.vector, 0.001));
-  
-  return result;
+  // Bump result ray to avoid reflection static
+  d_scaleVector(v, resultDir, 0.001);
+  d_pointPlusVector(resultPos, hit, v);
 }
