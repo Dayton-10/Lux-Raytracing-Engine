@@ -2,133 +2,276 @@
 // Computer Graphics
 // Fall 2019
 
-#include "stdio.h"
-#include "math.h"
+#include <stdio.h>
+#include <math.h>
+
+enum Reflectivity {NO_REFL, REFL};
+enum ShapeType {SPHERE, TRIANGLE};
+
+typedef float Point[3];
+typedef float Vector[3];
+typedef unsigned char Color[3];
+typedef float Ray[6]; // Point, Vector
 
 // Constant memory declarations
-__constant__ float Camera[3];
-__constant__ float Light[3];
-__constant__ float ImagePlaneBL[3];
-__constant__ float ImagePlaneTR[3];
+__constant__ Point Camera;
+__constant__ Point Light;
+__constant__ Point ImagePlaneBL;
+__constant__ Point ImagePlaneTR;
 __constant__ int XRes;
 __constant__ int YRes;
 
 // Device memory declarations (geometry attributes)
-float *d_radii;
-float *d_a; // Point coordinates stored in row-major order (x, y, z, x, y, z, etc.)
-float *d_b;
-float *d_c;
-int *d_reflective;
-unsigned char *d_color;
-
-enum reflectivity { NO_REFL, REFL };
+// Point coordinates stored in row-major order (x, y, z, x, y, z, etc.)
+int* d_shapeIndex;
+ShapeType* d_shape;
+Reflectivity* d_reflective;
+unsigned char* d_color;
+float* d_shapeInfo;
 
 typedef struct {
-  int n;                  // Number of objects
-  float *radii;           // Radii of objects (-1 if triangles)
-  float *a;               // Point A (center if sphere)
-  float *b;               // Point B
-  float *c;               // Point C
-  int *reflective;        // Material reflectivity (boolean)
-  unsigned char *color;   // Material color
+  int nShapes; // Total number of shapes stored
+  int* shapeIndex;
+  ShapeType* shape;
+  Reflectivity* reflective;
+  unsigned char* color;
+  
+  int nInfo;   // Total length of shapeInfo array (units of floats)
+  float* shapeInfo;
 } GeometryList;
+
+// Checks provided GeometryList for Null pointers
+void checkGeometryList(GeometryList* list) {
+  if (list == NULL) {
+    printf("ERROR: Unable to allocate memory for GeometryList\n");
+    exit(-1);
+  } else if (list->shapeIndex == NULL) {
+    printf("ERROR: Unable to allocate memory for GeometryList shapeIndex array\n");
+    exit(-1);
+  } else if (list->shape == NULL) {
+    printf("ERROR: Unable to allocate memory for GeometryList shape array\n");
+    exit(-1);
+  } else if (list->shapeInfo == NULL) {
+    printf("ERROR: Unable to allocate memory for GeometryList shapeInfo array\n");
+    exit(-1);
+  } else if (list->reflective == NULL) {
+    printf("ERROR: Unable to allocate memory for GeometryList reflective array\n");
+    exit(-1);
+  } else if (list->color == NULL) {
+    printf("ERROR: Unable to allocate memory for GeometryList color array\n");
+    exit(-1);
+  }
+}
 
 // Initializes GeometryList struct and returns pointer
 GeometryList* initGeometryList( ) {
-  GeometryList *list = (GeometryList *) malloc(sizeof(GeometryList));
-  list -> n = 0;
-  list -> radii = (float *) malloc(sizeof(float) * 0);
-  list -> a = (float *) malloc(sizeof(float) * 0);
-  list -> b = (float *) malloc(sizeof(float) * 0);
-  list -> c = (float *) malloc(sizeof(float) * 0);
-  list -> reflective = (int *) malloc(sizeof(int) * 0);
-  list -> color = (unsigned char *) malloc(sizeof(unsigned char) * 0);
+  GeometryList* list = (GeometryList*) malloc(sizeof(GeometryList));
+  list -> nShapes = 0;
+  list -> shapeIndex = (int*) malloc(sizeof(int) * 0);
+  list -> shape = (ShapeType*) malloc(sizeof(ShapeType) * 0);
+  list -> reflective = (Reflectivity*) malloc(sizeof(int) * 0);
+  list -> color = (unsigned char*) malloc(sizeof(Color) * 0);
+  
+  list -> nInfo = 0;
+  list -> shapeInfo = (float*) malloc(sizeof(float) * 0);
+  
+  checkGeometryList(list);
   return list;
 }
 
-// Adds a sphere with given traits to the GeometryList specified
-__host__ void addSphere(GeometryList *list, float radius, float center[3], int refl, unsigned char col[3]) {
-  list -> n += 1;
+// Adds a sphere with provided traits to the GeometryList specified
+void addSphere(GeometryList* list, Point center, float radius, Color col, Reflectivity refl) {
   
-  list -> radii = (float *) realloc(list->radii, (list->n) * sizeof(float));
-  list -> radii[list->n-1] = radius;
+  list -> nShapes += 1;
+  list -> shapeIndex = (int*)           realloc(list->shapeIndex, sizeof(int)          * (list->nShapes));
+  list -> shape      = (ShapeType*)     realloc(list->shape,      sizeof(ShapeType)    * (list->nShapes));
+  list -> reflective = (Reflectivity*)  realloc(list->reflective, sizeof(Reflectivity) * (list->nShapes));
+  list -> color      = (unsigned char*) realloc(list->color,      sizeof(Color)        * (list->nShapes));
   
-  list -> a = (float *) realloc(list->a, (list->n) * sizeof(float) * 3);
-  list -> a[3 * (list->n-1) + 0] = center[0];
-  list -> a[3 * (list->n-1) + 1] = center[1];
-  list -> a[3 * (list->n-1) + 2] = center[2];
+  list -> shapeInfo = (float*) realloc(list->shapeInfo, sizeof(float) * (list->nInfo + 4)); // 4 floats for a Sphere (Point, radius)
   
-  list -> b = (float *) realloc(list->b, (list->n) * sizeof(float) * 3);
+  checkGeometryList(list);
   
-  list -> c = (float *) realloc(list->c, (list->n) * sizeof(float) * 3);
+  // Add new info
+  list -> shapeIndex[list->nShapes-1] = list->nInfo;
+  list -> shape     [list->nShapes-1] = SPHERE;
+  list -> reflective[list->nShapes-1] = refl;
   
-  list -> reflective = (int *) realloc(list->reflective, (list->n) * sizeof(int));
-  list -> reflective[list->n-1] = refl;
+  list -> color     [3*(list->nShapes-1) + 0] = col[0];
+  list -> color     [3*(list->nShapes-1) + 1] = col[1];
+  list -> color     [3*(list->nShapes-1) + 2] = col[2];
   
-  list -> color = (unsigned char *) realloc(list->color, (list->n) * sizeof(unsigned char) * 3);
-  list -> color[3 * (list->n-1) + 0] = col[0];
-  list -> color[3 * (list->n-1) + 1] = col[1];
-  list -> color[3 * (list->n-1) + 2] = col[2];
+  list -> shapeInfo[list->nInfo+0] = center[0];
+  list -> shapeInfo[list->nInfo+1] = center[1];
+  list -> shapeInfo[list->nInfo+2] = center[2];
+  list -> shapeInfo[list->nInfo+3] = radius;
+  
+  list -> nInfo += 4;
 }
 
 // Adds a triangle with given traits to the GeometryList specified
-__host__ void addTriangle(GeometryList *list, float a[3], float b[3], float c[3], int refl, unsigned char col[3]) {
-  list -> n += 1;
+void addTriangle(GeometryList* list, Point a, Point b, Point c, Color col, Reflectivity refl) {
+  list -> nShapes += 1;
+  list -> shapeIndex = (int*)           realloc(list->shapeIndex, sizeof(int)          * (list->nShapes));
+  list -> shape      = (ShapeType*)     realloc(list->shape,      sizeof(ShapeType)    * (list->nShapes));
+  list -> reflective = (Reflectivity*)  realloc(list->reflective, sizeof(Reflectivity) * (list->nShapes));
+  list -> color      = (unsigned char*) realloc(list->color,      sizeof(Color)        * (list->nShapes));
   
-  list -> radii = (float *) realloc(list->radii, (list->n) * sizeof(float));
-  list -> radii[list->n-1] = -1; // Radius of -1 indicates a triangle
+  list -> shapeInfo = (float*) realloc(list->shapeInfo, sizeof(float) * (list->nInfo + 9)); // 9 floats for a triangle (3 Points)
   
-  list -> a = (float *) realloc(list->a, (list->n) * sizeof(float) * 3);
-  list -> a[3 * (list->n-1) + 0] = a[0];
-  list -> a[3 * (list->n-1) + 1] = a[1];
-  list -> a[3 * (list->n-1) + 2] = a[2];
+  checkGeometryList(list);
   
-  list -> b = (float *) realloc(list->b, (list->n) * sizeof(float) * 3);
-  list -> b[3 * (list->n-1) + 0] = b[0];
-  list -> b[3 * (list->n-1) + 1] = b[1];
-  list -> b[3 * (list->n-1) + 2] = b[2];
+  // Add new info
+  list -> shapeIndex[list->nShapes-1] = list->nInfo;
+  list -> shape     [list->nShapes-1] = TRIANGLE;
+  list -> reflective[list->nShapes-1] = refl;
   
-  list -> c = (float *) realloc(list->c, (list->n) * sizeof(float) * 3);
-  list -> c[3 * (list->n-1) + 0] = c[0];
-  list -> c[3 * (list->n-1) + 1] = c[1];
-  list -> c[3 * (list->n-1) + 2] = c[2];
+  list -> color[3*(list->nShapes-1) + 0] = col[0];
+  list -> color[3*(list->nShapes-1) + 1] = col[1];
+  list -> color[3*(list->nShapes-1) + 2] = col[2];
   
-  list -> reflective = (int *) realloc(list->reflective, (list->n) * sizeof(int));
-  list -> reflective[list->n-1] = refl;
+  list -> shapeInfo[list->nInfo+0] = a[0];
+  list -> shapeInfo[list->nInfo+1] = a[1];
+  list -> shapeInfo[list->nInfo+2] = a[2];
   
-  list -> color = (unsigned char *) realloc(list->color, (list->n) * sizeof(unsigned char) * 3);
-  list -> color[3 * (list->n-1) + 0] = col[0];
-  list -> color[3 * (list->n-1) + 1] = col[1];
-  list -> color[3 * (list->n-1) + 2] = col[2];
+  list -> shapeInfo[list->nInfo+3] = b[0];
+  list -> shapeInfo[list->nInfo+4] = b[1];
+  list -> shapeInfo[list->nInfo+5] = b[2];
+  
+  list -> shapeInfo[list->nInfo+6] = c[0];
+  list -> shapeInfo[list->nInfo+7] = c[1];
+  list -> shapeInfo[list->nInfo+8] = c[2];
+  
+  list -> nInfo += 9;
 }
 
-// Prints the information of the geometry at the given index
-__host__ void printGeometry(GeometryList *list, int index) {
-  if (index >= list -> n) {
-    printf("No geometry at index %d\n", index);
+// Removes the geometry at the given index from the GeometryList
+void removeGeometry(GeometryList* list, int index) {
+  if (index < 0 || index >= list->nShapes) {
+    printf("WARNING: removeGeometry: invalid index %d\n", index);
     return;
   }
   
-  printf("Geometry at index %d:\n", index);
-  printf("\tRadius: %f\n", list->radii[index]);
-  printf("\tPoint 1: %f, %f, %f\n", list->a[3*index+0], list->a[3*index+1], list->a[3*index+2]);
-  printf("\tPoint 2: %f, %f, %f\n", list->b[3*index+0], list->b[3*index+1], list->b[3*index+2]);
-  printf("\tPoint 3: %f, %f, %f\n", list->c[3*index+0], list->c[3*index+1], list->c[3*index+2]);
-  printf("\tReflectivity: %d\n", list->reflective[index]);
-  printf("\tColor: %d, %d, %d\n", list->color[3*index+0], list->color[3*index+1], list->color[3*index+2]);
+  // Copy data forwards in shapeInfo array
+  switch(list->shape[index]) {
+    
+    case SPHERE: {
+      for (int i=list->shapeIndex[index]; i<list->nInfo-4; i++) {
+        list -> shapeInfo[i] = list -> shapeInfo[i+4];
+      }
+      for (int i=index; i<(list->nShapes); i++) {
+        list -> shapeIndex[i] -= 4;
+      }
+      list->nInfo -= 4;
+    }
+    break;
+    
+    case TRIANGLE: {
+      for (int i=list->shapeIndex[index]; i<list->nInfo-9; i++) {
+        list -> shapeInfo[i] = list -> shapeInfo[i+9];
+      }
+      for (int i=index; i<(list->nShapes); i++) {
+        list -> shapeIndex[i] -= 9;
+      }
+      list->nInfo -= 9;
+    }
+    break;
+  }
+  
+  // Copy data forwards in other arrays
+  for (int i=index; i<(list->nShapes)-1; i++) {
+    list -> shapeIndex[i] = list -> shapeIndex[i+1];
+    list -> shape[i]      = list -> shape[i+1];
+    list -> reflective[i] = list -> reflective[i+1];
+    
+    list -> color[3 * i + 0] = list -> color[3 * (i+1) + 0];
+    list -> color[3 * i + 1] = list -> color[3 * (i+1) + 1];
+    list -> color[3 * i + 2] = list -> color[3 * (i+1) + 2];
+  }
+  list->nShapes -= 1;
+  
+  // Realloc arrays
+  list -> shapeIndex = (int*)           realloc(list->shapeIndex, sizeof(int)          * (list->nShapes));
+  list -> shape      = (ShapeType*)     realloc(list->shape,      sizeof(ShapeType)    * (list->nShapes));
+  list -> reflective = (Reflectivity*)  realloc(list->reflective, sizeof(Reflectivity) * (list->nShapes));
+  list -> color      = (unsigned char*) realloc(list->color,      sizeof(Color)        * (list->nShapes));
+  
+  list -> shapeInfo = (float*) realloc(list->shapeInfo, sizeof(float) * (list->nInfo));
+}
+
+// Prints the information of the requested geometry
+void printGeometry(GeometryList* list, int index) {
+  if (index < 0 || index > list->nShapes) {
+    printf("Invalid index: %d\n", index);
+    return;
+  }
+  
+  float* data = &(list->shapeInfo[list->shapeIndex[index]]); // Get address of first float of shape
+  
+  switch(list->shape[index]) {
+    case SPHERE: {
+      printf("Geometry at index %d: Sphere\n", index);
+      printf("Center at: %f, %f, %f\n", data[0], data[1], data[2]);
+      printf("Radius of: %f\n", data[3]);
+      printf("Color of: %d, %d, %d\n", list->color[3*index+0], list->color[3*index+1], list->color[3*index+2]);
+      printf("Reflectivity of: %d\n", list->reflective[index]);
+    }
+    break;
+    
+    case TRIANGLE: {
+      printf("Geometry at index %d: Triangle\n", index);
+      printf("Point A at: %f, %f, %f\n", data[0], data[1], data[2]);
+      printf("Point B at: %f, %f, %f\n", data[3], data[4], data[5]);
+      printf("Point C at: %f, %f, %f\n", data[6], data[7], data[8]);
+      printf("Color of: %d, %d, %d\n", list->color[3*index+0], list->color[3*index+1], list->color[3*index+2]);
+      printf("Reflectivity of: %d\n", list->reflective[index]);
+    }
+  }
   printf("\n");
 }
 
-__device__ float d_norm(float *v) {
+void printAllGeometry(GeometryList* list) {
+  for (int i=0; i<list->nShapes; i++) {
+    printGeometry(list, i);
+  }
+}
+
+// Returns a null-terminated string concisely describing the selected Geometry
+//   String must be freed after use
+__host__ char* toStringGeometry(GeometryList* list, int index) {
+  
+  if (index < 0 || index > list->nShapes) {
+    printf("Invalid index: %d\n", index);
+    return NULL;
+  }
+  
+  char* buffer = (char*) malloc(sizeof(char) * 100);
+  float* data = &(list->shapeInfo[list->shapeIndex[index]]); // Get address of first float of shape
+  
+  switch(list->shape[index]) {
+    
+    case SPHERE:
+      sprintf(buffer, "Sphere:  {%.2f, %.2f, %.2f} r=%f\0", data[0], data[1], data[2], data[3]);
+    break;
+    
+    case TRIANGLE:
+      sprintf(buffer, "Triangle: {%.2f, %.2f, %.2f} {%.2f, %.2f, %.2f} {%.2f, %.2f, %.2f}\0", data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8]);
+    break;
+  }
+  
+  return buffer;
+}
+
+__device__ float d_norm(Vector v) {
   return sqrtf(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
 }
 
-__device__ float d_distance(float *p, float *q) {
+__device__ float d_distance(Point p, Point q) {
   return sqrtf(p[0]*q[0] + p[1]*q[1] + p[2]*q[2]);
 }
 
 // Returns a normalized vector
-__device__ void d_normalize(float *result, float *v) {
+__device__ void d_normalize(Vector result, Vector v) {
   float n = d_norm(v);
   result[0] = v[0] / n;
   result[1] = v[1] / n;
@@ -136,32 +279,32 @@ __device__ void d_normalize(float *result, float *v) {
 }
 
 // Returns scalar result of dot product of input vectors
-__device__ float d_dotProduct(float *v, float *w) {
+__device__ float d_dotProduct(Vector v, Vector w) {
   return v[0]*w[0] + v[1]*w[1] + v[2]*w[2];
 }
 
 // Returns a vector of the cross product of input vectors
-__device__ void d_crossProduct(float *result, float *v, float *w) {
+__device__ void d_crossProduct(Vector result, Vector v, Vector w) {
   result[0] = v[1]*w[2] - v[2]*w[1];
   result[1] = v[2]*w[0] - v[0]*w[2];
   result[2] = v[0]*w[1] - v[1]*w[0];
 }
 
 // Returns a vector describing the difference between input points
-__device__ void d_pointDifference(float *result, float *p, float *q) {
+__device__ void d_pointDifference(Vector result, Point p, Point q) {
   result[0] = p[0] - q[0];
   result[1] = p[1] - q[1];
   result[2] = p[2] - q[2];
 }
 
 // Returns a vector orthogonal to a sphere, relative to a given point
-__device__ void d_sphereNormal(float *result, float *center, float *p) {
+__device__ void d_sphereNormal(Vector result, Point center, Point p) {
   d_pointDifference(result, p, center);
   d_normalize(result, result);
 }
 
 // Returns a vector orthogonal to a triangle's surface
-__device__ void d_triangleNormal(float *result, float *a, float *b, float *c) {
+__device__ void d_triangleNormal(Vector result, Point a, Point b, Point c) {
   float v[3];
   float w[3];
   d_pointDifference(v, a, b);
@@ -171,21 +314,21 @@ __device__ void d_triangleNormal(float *result, float *a, float *b, float *c) {
 }
 
 // Returns a point equal to the point given plus the given vector
-__device__ void d_pointPlusVector(float *result, float *p, float *v) {
+__device__ void d_pointPlusVector(Point result, Point p, Vector v) {
   result[0] = p[0] + v[0];
   result[1] = p[1] + v[1];
   result[2] = p[2] + v[2];
 }
 
 // Returns a vector multiplied by scalar f
-__device__ void d_scaleVector(float *result, float *v, float f) {
+__device__ void d_scaleVector(Vector result, Vector v, float f) {
   result[0] = v[0] * f;
   result[1] = v[1] * f;
   result[2] = v[2] * f;
 }
 
 // Returns the sum of two vectors
-__device__ void d_vectorAdd(float *result, float *v, float *w) {
+__device__ void d_vectorAdd(Vector result, Vector v, Vector w) {
   result[0] = v[0] + w[0];
   result[1] = v[1] + w[1];
   result[2] = v[2] + w[2];
@@ -194,25 +337,25 @@ __device__ void d_vectorAdd(float *result, float *v, float *w) {
 // Returns a float describing the distance to an intersection with the given geometry
 //   The point of intersection can be calculated by adding the (rayDir * result) + rayPos
 //   The normal vector of intersection can be calculated by using a d_*normal() function with the hit point given (if a sphere)
-__device__ float d_intersect(float *rayPos, float *rayDir, int geomIndex, float *g_radii, float *g_a, float *g_b, float *g_c) {
+__device__ float d_intersect(Ray ray, int index, int* shapeIndex, ShapeType* shape, float* shapeInfo) {
   
-  if (g_radii[geomIndex] == -1) { // If triangle
+  if (shape[index] == TRIANGLE) { // If triangle
   
-    float a = g_a[3*geomIndex + 0] - g_b[3*geomIndex + 0];
-    float b = g_a[3*geomIndex + 1] - g_b[3*geomIndex + 1];
-    float c = g_a[3*geomIndex + 2] - g_b[3*geomIndex + 2];
+    float a = shapeInfo[shapeIndex[index] + 0] - shapeInfo[shapeIndex[index] + 3];
+    float b = shapeInfo[shapeIndex[index] + 1] - shapeInfo[shapeIndex[index] + 4];
+    float c = shapeInfo[shapeIndex[index] + 2] - shapeInfo[shapeIndex[index] + 5];
     
-    float d = g_a[3*geomIndex + 0] - g_c[3*geomIndex + 0];
-    float e = g_a[3*geomIndex + 1] - g_c[3*geomIndex + 1];
-    float f = g_a[3*geomIndex + 2] - g_c[3*geomIndex + 2];
+    float d = shapeInfo[shapeIndex[index] + 0] - shapeInfo[shapeIndex[index] + 6];
+    float e = shapeInfo[shapeIndex[index] + 1] - shapeInfo[shapeIndex[index] + 7];
+    float f = shapeInfo[shapeIndex[index] + 2] - shapeInfo[shapeIndex[index] + 8];
     
-    float g = rayDir[0];
-    float h = rayDir[1];
-    float i = rayDir[2];
+    float g = ray[3];
+    float h = ray[4];
+    float i = ray[5];
     
-    float j = g_a[3*geomIndex + 0] - rayPos[0];
-    float k = g_a[3*geomIndex + 1] - rayPos[1];
-    float l = g_a[3*geomIndex + 2] - rayPos[2];
+    float j = shapeInfo[shapeIndex[index] + 0] - ray[0];
+    float k = shapeInfo[shapeIndex[index] + 1] - ray[1];
+    float l = shapeInfo[shapeIndex[index] + 2] - ray[2];
     
     float m = a*(e*i - h*f) + b*(g*f - d*i) + c*(d*h - e*g);
     
@@ -233,17 +376,17 @@ __device__ float d_intersect(float *rayPos, float *rayDir, int geomIndex, float 
     }
     
     
-  } else {                        // Else, if sphere
+  } else { // Else, if sphere
     
-    float a = d_dotProduct(rayDir, rayDir);
+    float a = d_dotProduct(&ray[3], &ray[3]);
     
-    float v[3];
-    float w[3];
-    d_scaleVector(v, rayDir, 2);
-    d_pointDifference(w, rayPos, &g_a[3*geomIndex]);
+    Vector v;
+    Vector w;
+    d_scaleVector(v, &ray[3], 2);
+    d_pointDifference(w, &ray[0], &shapeInfo[shapeIndex[index]]);
     float b = d_dotProduct(v, w);
     
-    float c = d_dotProduct(w, w) - (g_radii[geomIndex] * g_radii[geomIndex]);
+    float c = d_dotProduct(w, w) - (shapeInfo[shapeIndex[index]+3] * shapeInfo[shapeIndex[index]+3]);
     
     float t1 = (-b + sqrtf(b*b - 4*a*c))/(2*a);
     float t2 = (-b - sqrtf(b*b - 4*a*c))/(2*a);
@@ -263,9 +406,9 @@ __device__ float d_intersect(float *rayPos, float *rayDir, int geomIndex, float 
 //   Will set result Pos/Dir to reflected ray
 //   Requires distance to hit and normal vector of hit object
 // Always increment numReflections after calling this function!
-__device__ void d_reflect(float *resultPos, float *resultDir, float *rayPos, float *rayDir, float *hit, float *vector) {
-  float v[3];
-  float w[3];
+__device__ void d_reflect(Point resultPos, Vector resultDir, Point rayPos, Vector rayDir, Point hit, Vector vector) {
+  Vector v;
+  Vector w;
   d_scaleVector(v, vector, -2*d_dotProduct(rayDir, vector));
   d_vectorAdd(w, rayDir, v);
   d_normalize(resultDir, w);
